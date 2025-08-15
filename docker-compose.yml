@@ -1,0 +1,61 @@
+version: '3.8'
+
+services:
+  brain2text:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: brain2text:latest
+    container_name: brain2text-dev
+    
+    # GPU support
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    
+    # Environment variables
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CUDA_VISIBLE_DEVICES=0
+      - PYTHONUNBUFFERED=1
+    
+    # Volume mounts
+    volumes:
+      # Optional: Mount external data directory (uncomment if you want persistent data)
+      # - ./data:/workspace/data
+      
+      # Optional: Mount for development (uncomment for live code editing)
+      # - .:/workspace
+      
+      # Mount for storing results/outputs
+      - ./results:/workspace/results
+    
+    # Port mapping (for Jupyter notebook access)
+    ports:
+      - "8888:8888"
+      - "6379:6379"  # Redis port
+    
+    # Interactive mode
+    stdin_open: true
+    tty: true
+    
+    # Restart policy
+    restart: unless-stopped
+    
+    # Memory and shared memory settings (adjust based on your system)
+    shm_size: 8g
+    
+    # Working directory
+    working_dir: /workspace
+
+  # Optional: Standalone Redis service (if you prefer separate container)
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: brain2text-redis
+  #   ports:
+  #     - "6379:6379"
+  #   restart: unless-stopped

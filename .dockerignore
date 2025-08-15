@@ -1,0 +1,55 @@
+# Large data files (will be downloaded via script instead)
+data/languageModel.tar.gz
+data/languageModel_5gram.tar.gz
+data/tuningTasks.tar.gz
+data/hdf5_data_final/
+data/t15_pretrained_rnn_baseline/
+data/*.pkl
+data/*.zip
+data/*.tar.gz
+
+# Backup and result files
+backup_results.tar.gz
+brain_to_text_results_*.tar.gz
+*.csv
+results/
+
+# Git and version control
+.git/
+.gitignore
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+.pytest_cache/
+
+# Jupyter notebook checkpoints
+.ipynb_checkpoints/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Docker files (don't need these in the container)
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Documentation
+README.md
+*.md
+*.png
+
+# Temporary files
+*.tmp
+*.log
