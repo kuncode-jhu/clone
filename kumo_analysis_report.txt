@@ -1,0 +1,109 @@
+PHONEME DATABASE ANALYSIS REPORT FOR KUMO AI
+==================================================
+
+DATABASE SUMMARY:
+Total trials: 1718
+Total phoneme instances: 45666
+Unique post-implant days: 15
+Unique vocabulary sizes: 2
+Unique phonemes: 40
+
+PHONEME ACCURACY BY TYPE:
+phoneme_type phoneme  total_instances  correct_instances  accuracy_percent  avg_confidence  avg_logit_std
+   consonant       W              892                722             80.94        0.996316       7.730578
+   consonant      DH             1174                928             79.05        0.994963       7.572681
+   consonant       Y              460                353             76.74        0.997175       7.904869
+   consonant      TH              221                166             75.11        0.994332       8.401007
+   consonant      HH              569                415             72.93        0.992160       7.885160
+   consonant       M             1061                751             70.78        0.994104       8.306745
+   consonant       T             2909               2034             69.92        0.993604       8.501072
+   consonant       V              754                526             69.76        0.991389       8.490751
+   consonant       L             1319                905             68.61        0.993346       8.567041
+   consonant       B              552                374             67.75        0.991416       8.277940
+   consonant       F              550                371             67.45        0.992704       8.387376
+   consonant       S             1526               1029             67.43        0.994890       8.553489
+   consonant       P              662                443             66.92        0.988964       8.521540
+   consonant       G              439                293             66.74        0.994045       8.462975
+   consonant       N             2191               1452             66.27        0.995021       8.568558
+   consonant       R             1555               1029             66.17        0.994071       8.515840
+   consonant      JH              191                126             65.97        0.995883       8.340492
+   consonant       Z              913                602             65.94        0.993556       8.570810
+   consonant      NG              423                278             65.72        0.994013       8.696747
+   consonant       K             1068                688             64.42        0.991326       8.565526
+   consonant       D             1367                879             64.30        0.993421       8.478375
+   consonant      CH              161                 99             61.49        0.996824       8.604592
+   consonant      SH              169                103             60.95        0.997194       7.862507
+   consonant      ZH              118                 61             51.69        0.981464       8.500905
+     silence     SIL            10323               8009             77.58        0.993851       8.547461
+       vowel      AY             1055                840             79.62        0.994896       7.221921
+       vowel      UW              928                686             73.92        0.991640       8.478835
+       vowel      AW              282                198             70.21        0.992756       8.286957
+       vowel      UH              190                133             70.00        0.995530       8.441645
+       vowel      IY             1238                854             68.98        0.995182       8.292067
+       vowel      IH             2179               1497             68.70        0.993630       8.229077
+       vowel      EY              581                398             68.50        0.994064       8.353052
+       vowel      AE              982                671             68.33        0.994739       8.389673
+       vowel      AH             3010               2052             68.17        0.994649       8.526341
+       vowel      OY              127                 86             67.72        0.993529       8.379739
+       vowel      AA              760                511             67.24        0.991870       8.528068
+       vowel      OW              565                370             65.49        0.997488       8.490335
+       vowel      EH             1020                641             62.84        0.991825       8.373866
+       vowel      ER              686                415             60.50        0.994073       8.578112
+       vowel      AO              496                295             59.48        0.989177       8.379668
+
+MOST DIFFICULT PHONEMES (Lowest Accuracy):
+phoneme phoneme_type  total_instances  correct_instances  accuracy_percent  avg_confidence  avg_logit_std
+     ZH    consonant              118                 61             51.69        0.981464       8.500905
+     AO        vowel              496                295             59.48        0.989177       8.379668
+     ER        vowel              686                415             60.50        0.994073       8.578112
+     SH    consonant              169                103             60.95        0.997194       7.862507
+     CH    consonant              161                 99             61.49        0.996824       8.604592
+     EH        vowel             1020                641             62.84        0.991825       8.373866
+      D    consonant             1367                879             64.30        0.993421       8.478375
+      K    consonant             1068                688             64.42        0.991326       8.565526
+     OW        vowel              565                370             65.49        0.997488       8.490335
+     NG    consonant              423                278             65.72        0.994013       8.696747
+
+CONFIDENCE ANALYSIS:
+confidence_level  total_instances  correct_instances  accuracy_percent  avg_confidence  avg_logit_std
+Medium (0.3-0.7)              365                176             48.22        0.596609       7.611101
+     High (>0.7)            45301              32107             70.87        0.996985       8.408940
+
+TOP PHONEME CONFUSION PATTERNS:
+true_phoneme predicted_phoneme true_type predicted_type  frequency  percentage
+           T               SIL consonant        silence        247        1.85
+         SIL                 T   silence      consonant        224        1.67
+         SIL                AH   silence          vowel        194        1.45
+          AH               SIL     vowel        silence        191        1.43
+           N               SIL consonant        silence        171        1.28
+           D               SIL consonant        silence        134        1.00
+         SIL                 D   silence      consonant        131        0.98
+         SIL                 N   silence      consonant        131        0.98
+           S               SIL consonant        silence        119        0.89
+          AH                 N     vowel      consonant        112        0.84
+         SIL                 S   silence      consonant        110        0.82
+         SIL                IH   silence          vowel        109        0.81
+           R               SIL consonant        silence        103        0.77
+          IY               SIL     vowel        silence        101        0.75
+           Z               SIL consonant        silence        101        0.75
+
+PERFORMANCE BY EXPERIMENTAL CONDITIONS:
+ post_implant_day  vocab_size corpus_type split_type  num_trials  avg_phoneme_error_rate  avg_word_error_rate  avg_phonemes_per_trial  avg_words_per_trial
+               25          50     50-Word      Train          50                0.058650             0.005000               18.000000             4.500000
+               27          50     50-Word      Train          40                0.049104             0.000000               17.800000             4.525000
+               27      125000 Switchboard      Train          30                0.486311             0.090595               27.133333             6.433333
+               34      125000 Switchboard      Train         100                0.353308             0.129436               25.610000             5.880000
+               46      125000 Switchboard      Train          99                0.278360             0.049607               25.080808             5.919192
+               48      125000 Switchboard      Train         115                0.369740             0.063102               27.860870             6.278261
+               69      125000 Switchboard      Train         115                0.361213             0.066595               25.921739             6.078261
+               74      125000 Switchboard      Train          74                0.374028             0.053319               27.229730             6.256757
+               76      125000 Switchboard      Train         208                0.282232             0.064198               26.634615             6.163462
+               81      125000 Switchboard      Train         138                0.280288             0.047950               26.789855             6.253623
+               83      125000 Switchboard      Train         169                0.291007             0.050712               27.384615             6.366864
+               88      125000 Switchboard      Train          90                0.238161             0.038272               24.700000             5.688889
+               90      125000 Switchboard      Train         148                0.236228             0.040233               27.608108             6.439189
+               95      125000 Switchboard      Train          50                0.230040             0.014000               26.560000             6.040000
+              223      125000 Switchboard      Train         146                0.253752             0.037856               30.027397             6.856164
+              244      125000 Switchboard      Train         146                0.211480             0.019051               32.328767             7.513699
+
+END OF REPORT
