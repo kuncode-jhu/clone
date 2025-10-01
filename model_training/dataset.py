@@ -1,10 +1,12 @@
 import os
 import torch
-from torch.utils.data import Dataset 
+from torch.utils.data import Dataset
 import h5py
 import numpy as np
 from torch.nn.utils.rnn import pad_sequence
-import math 
+import math
+
+from diphone_utils import DiphoneCodec, DiphoneConfig
 
 class BrainToTextDataset(Dataset):
     '''
@@ -22,8 +24,10 @@ class BrainToTextDataset(Dataset):
             days_per_batch = 1, 
             random_seed = -1,
             must_include_days = None,
-            feature_subset = None
-            ): 
+            feature_subset = None,
+            diphone_codec: DiphoneCodec | None = None,
+            diphone_config: DiphoneConfig | None = None,
+            ):
         '''
         trial_indicies:  (dict)      - dictionary with day numbers as keys and lists of trial indices as values
         n_batches:       (int)       - number of random training batches to create
@@ -59,6 +63,8 @@ class BrainToTextDataset(Dataset):
         self.n_days = len(trial_indicies.keys())
 
         self.feature_subset = feature_subset
+        self.diphone_codec = diphone_codec
+        self.diphone_config = diphone_config or DiphoneConfig() if diphone_codec else None
 
         # Calculate total number of trials in the dataset
         for d in trial_indicies:
@@ -112,6 +118,10 @@ class BrainToTextDataset(Dataset):
             'trial_nums' : [],
         }
 
+        if self.diphone_codec is not None:
+            batch['diphone_seq_ids'] = []
+            batch['diphone_seq_lens'] = []
+
         index = self.batch_index[idx]
 
         # Iterate through each day in the index
@@ -133,7 +143,12 @@ class BrainToTextDataset(Dataset):
 
                         batch['input_features'].append(input_features)
 
-                        batch['seq_class_ids'].append(torch.from_numpy(g['seq_class_ids'][:]))  # phoneme labels
+                        phoneme_seq = torch.from_numpy(g['seq_class_ids'][:])  # phoneme labels
+                        batch['seq_class_ids'].append(phoneme_seq)
+                        if self.diphone_codec is not None:
+                            diphone_seq = self.diphone_codec.encode_sequence(phoneme_seq.tolist())
+                            batch['diphone_seq_ids'].append(diphone_seq)
+                            batch['diphone_seq_lens'].append(len(diphone_seq))
                         batch['transcriptions'].append(torch.from_numpy(g['transcription'][:])) # character level transcriptions
                         batch['n_time_steps'].append(g.attrs['n_time_steps']) # number of time steps in the trial - required since we are padding
                         batch['phone_seq_lens'].append(g.attrs['seq_len']) # number of phonemes in the label - required since we are padding
@@ -148,13 +163,17 @@ class BrainToTextDataset(Dataset):
         # Pad data to form a cohesive batch
         batch['input_features'] = pad_sequence(batch['input_features'], batch_first = True, padding_value = 0)
         batch['seq_class_ids'] = pad_sequence(batch['seq_class_ids'], batch_first = True, padding_value = 0)
+        if self.diphone_codec is not None:
+            batch['diphone_seq_ids'] = pad_sequence(batch['diphone_seq_ids'], batch_first = True, padding_value = 0)
 
-        batch['n_time_steps'] = torch.tensor(batch['n_time_steps']) 
+        batch['n_time_steps'] = torch.tensor(batch['n_time_steps'])
         batch['phone_seq_lens'] = torch.tensor(batch['phone_seq_lens'])
         batch['day_indicies'] = torch.tensor(batch['day_indicies'])
         batch['transcriptions'] = torch.stack(batch['transcriptions'])
         batch['block_nums'] = torch.tensor(batch['block_nums'])
         batch['trial_nums'] = torch.tensor(batch['trial_nums'])
+        if self.diphone_codec is not None:
+            batch['diphone_seq_lens'] = torch.tensor(batch['diphone_seq_lens'])
 
         return batch
     
