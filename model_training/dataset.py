@@ -22,8 +22,11 @@ class BrainToTextDataset(Dataset):
             days_per_batch = 1, 
             random_seed = -1,
             must_include_days = None,
-            feature_subset = None
-            ): 
+            feature_subset = None,
+            use_diphone_targets = False,
+            sil_phoneme_id = None,
+            n_phonemes = None,
+            ):
         '''
         trial_indicies:  (dict)      - dictionary with day numbers as keys and lists of trial indices as values
         n_batches:       (int)       - number of random training batches to create
@@ -59,6 +62,24 @@ class BrainToTextDataset(Dataset):
         self.n_days = len(trial_indicies.keys())
 
         self.feature_subset = feature_subset
+
+        self.use_diphone_targets = use_diphone_targets
+        if self.use_diphone_targets:
+            if sil_phoneme_id is None:
+                raise ValueError('sil_phoneme_id must be provided when use_diphone_targets is True')
+            if n_phonemes is None:
+                raise ValueError('n_phonemes must be provided when use_diphone_targets is True')
+
+            if sil_phoneme_id == 0:
+                raise ValueError('sil_phoneme_id cannot be the CTC blank index (0).')
+
+            self.n_phonemes = n_phonemes
+            self.sil_phoneme_id = sil_phoneme_id
+            # Convert SIL index to zero-based (excluding blank)
+            self.sil_zero_index = self.sil_phoneme_id - 1
+
+            if self.sil_zero_index < 0 or self.sil_zero_index >= self.n_phonemes:
+                raise ValueError(f'sil_phoneme_id {sil_phoneme_id} is out of range for {self.n_phonemes} phonemes.')
 
         # Calculate total number of trials in the dataset
         for d in trial_indicies:
@@ -112,6 +133,10 @@ class BrainToTextDataset(Dataset):
             'trial_nums' : [],
         }
 
+        if self.use_diphone_targets:
+            batch['diphone_seq_class_ids'] = []
+            batch['diphone_seq_lens'] = []
+
         index = self.batch_index[idx]
 
         # Iterate through each day in the index
@@ -133,13 +158,20 @@ class BrainToTextDataset(Dataset):
 
                         batch['input_features'].append(input_features)
 
-                        batch['seq_class_ids'].append(torch.from_numpy(g['seq_class_ids'][:]))  # phoneme labels
+                        seq_ids = torch.from_numpy(g['seq_class_ids'][:])
+                        batch['seq_class_ids'].append(seq_ids)  # phoneme labels
                         batch['transcriptions'].append(torch.from_numpy(g['transcription'][:])) # character level transcriptions
                         batch['n_time_steps'].append(g.attrs['n_time_steps']) # number of time steps in the trial - required since we are padding
-                        batch['phone_seq_lens'].append(g.attrs['seq_len']) # number of phonemes in the label - required since we are padding
-                        batch['day_indicies'].append(int(d)) # day index of each trial - required for the day specific layers 
+                        seq_len = g.attrs['seq_len']
+                        batch['phone_seq_lens'].append(seq_len) # number of phonemes in the label - required since we are padding
+                        batch['day_indicies'].append(int(d)) # day index of each trial - required for the day specific layers
                         batch['block_nums'].append(g.attrs['block_num'])
                         batch['trial_nums'].append(g.attrs['trial_num'])
+
+                        if self.use_diphone_targets:
+                            diphone_seq, diphone_len = self._build_diphone_sequence(seq_ids, seq_len)
+                            batch['diphone_seq_class_ids'].append(diphone_seq)
+                            batch['diphone_seq_lens'].append(diphone_len)
                     
                     except Exception as e:
                         print(f'Error loading trial {t} from session {self.trial_indicies[d]["session_path"]}: {e}')
@@ -149,14 +181,53 @@ class BrainToTextDataset(Dataset):
         batch['input_features'] = pad_sequence(batch['input_features'], batch_first = True, padding_value = 0)
         batch['seq_class_ids'] = pad_sequence(batch['seq_class_ids'], batch_first = True, padding_value = 0)
 
-        batch['n_time_steps'] = torch.tensor(batch['n_time_steps']) 
+        batch['n_time_steps'] = torch.tensor(batch['n_time_steps'])
         batch['phone_seq_lens'] = torch.tensor(batch['phone_seq_lens'])
         batch['day_indicies'] = torch.tensor(batch['day_indicies'])
         batch['transcriptions'] = torch.stack(batch['transcriptions'])
         batch['block_nums'] = torch.tensor(batch['block_nums'])
         batch['trial_nums'] = torch.tensor(batch['trial_nums'])
 
+        if self.use_diphone_targets:
+            batch['diphone_seq_class_ids'] = pad_sequence(batch['diphone_seq_class_ids'], batch_first = True, padding_value = 0)
+            batch['diphone_seq_lens'] = torch.tensor(batch['diphone_seq_lens'])
+
         return batch
+
+    def _build_diphone_sequence(self, seq_ids, seq_len):
+        """Convert a phoneme sequence into the diphone representation used by DCoND.
+
+        The returned tensor contains indices for diphone classes with 0 reserved for
+        the CTC blank symbol. Each diphone index is therefore offset by +1.
+        """
+
+        seq = seq_ids[:seq_len].clone().to(torch.long)
+
+        # Remove any residual CTC blank tokens that may appear in the target.
+        seq = seq[seq != 0]
+
+        if seq.numel() > 0:
+            zero_based = seq - 1
+        else:
+            zero_based = seq
+
+        diphone_indices = []
+        prev_phone = self.sil_zero_index
+
+        if zero_based.numel() == 0:
+            diphone_indices.append(prev_phone * self.n_phonemes + self.sil_zero_index)
+        else:
+            for phone in zero_based:
+                diphone_indices.append(prev_phone * self.n_phonemes + phone.item())
+                diphone_indices.append(phone.item() * self.n_phonemes + phone.item())
+                prev_phone = phone.item()
+
+            diphone_indices.append(prev_phone * self.n_phonemes + self.sil_zero_index)
+
+        diphone_tensor = torch.tensor(diphone_indices, dtype=torch.long)
+
+        # Offset by +1 to reserve 0 for the CTC blank label.
+        return diphone_tensor + 1, torch.tensor(len(diphone_indices), dtype=torch.long)
     
 
     def create_batch_index_train(self):

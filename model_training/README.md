@@ -22,6 +22,34 @@ python train_model.py
 ```
 The model will train for 120,000 mini-batches (~3.5 hours on an RTX 4090) and should achieve an aggregate phoneme error rate of 10.1% on the validation partition. We note that the number of training batches and specific model hyperparameters may not be optimal here, and this baseline model is only meant to serve as an example. See [`rnn_args.yaml`](rnn_args.yaml) for a list of all hyperparameters.
 
+### DCoND-LIFT: diphones + LLM refinement
+The repository also contains an implementation of the DCoND-LIFT approach described in *Brain-to-Text Decoding with Context-Aware Neural Representations and Large Language Models* (Li et al., 2024). The key additions are:
+
+* **DCoND neural decoder** – a GRU backbone that predicts diphone distributions and marginalises them into phoneme probabilities via a learned blank/diphone head. Training jointly optimises the diphone CTC loss and the marginal phoneme CTC loss with a configurable trade-off parameter `α` that is annealed during the first part of training.
+* **Dataset extensions** – when DCoND mode is enabled the dataset automatically constructs diphone supervision targets (including silence-to-phoneme transitions) from the provided phoneme sequences.
+* **Evaluation pipeline updates** – `evaluate_model.py` transparently loads either the baseline GRU model or the DCoND variant based on the saved configuration and reports phoneme logits produced by the marginalisation step.
+
+All relevant hyperparameters live in [`dcond_args.yaml`](dcond_args.yaml). To launch DCoND training run:
+
+```bash
+conda activate b2txt25
+python train_model.py --config dcond_args.yaml
+```
+
+This configuration enables diphone supervision, sets the silence index to the CMU `SIL` class (ID 40), and linearly increases `α` from 0.1 to 0.6 over the first 20k optimisation steps. Validation checkpoints store both phoneme and diphone losses so you can monitor convergence.
+
+After training, evaluate the model exactly as with the baseline decoder. The script will detect the stored configuration in `checkpoint/args.yaml` and instantiate the DCoND model automatically. The resulting logits (saved when `save_val_logits: true`) now correspond to the marginalised phoneme distribution required for downstream language model processing.
+
+### Preparing LIFT data for large language models
+Running `evaluate_model.py` with `--eval_type val` produces a `val_metrics.pkl` file (when `save_val_logits: true`). For DCoND runs this pickle contains, per trial, the marginal phoneme posteriors, decoded phoneme sequences, and ground-truth transcriptions. These outputs can be combined with the n-best sentences produced by the 5-gram + OPT pipeline (see below) to form the prompts used for GPT-3.5 in-context learning or fine-tuning, as described in Li et al. (2024).
+
+A recommended workflow for reproducing DCoND-LIFT end-to-end is:
+
+1. Train the DCoND model with `dcond_args.yaml`.
+2. Evaluate the model on the validation or test split to export phoneme logits.
+3. Run the 5-gram + OPT language model (next section) to generate candidate sentences for each trial.
+4. Pair each candidate sentence with its corresponding phoneme hypotheses from step 2 to construct prompts for GPT-based refinement (examples of the required prompt format are given in Appendix A.8 of the paper and reproduced in the repository documentation).
+
 ## Evaluation
 ### Start redis server
 To evaluate the model, first start a redis server on `localhost` in terminal with:
