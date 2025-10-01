@@ -26,6 +26,8 @@ The code is organized into five main directories: `utils`, `analyses`, `data`, `
 ## Competition
 This repository also includes baseline model training and evaluation code for the [Brain-to-Text '25 Competition](https://www.kaggle.com/competitions/brain-to-text-25). The competition is hosted on Kaggle, and the code in this repository is designed to help participants train and evaluate their own models for the competition. The baseline model provided here is a custom PyTorch implementation of the RNN model used in the paper, which can be trained and evaluated using the provided data.
 
+In addition to the baseline, we provide an end-to-end implementation of the DCoND-LIFT diphone-aware decoder and LLM refinement pipeline introduced by Li et al. (2024). The new trainer (`model_training/dcond_trainer.py`), configuration (`model_training/dcond_args.yaml`), and utilities (`model_training/dcond_utils.py`) reproduce the divide-and-conquer training strategy and expose marginalised phoneme logits that can be passed to the existing language-model infrastructure or to external LLMs for LIFT style error correction.
+
 ## Data
 ### Data Overview
 The data used in this repository (which can be downloaded from [Dryad](https://datadryad.org/stash/dataset/doi:10.5061/dryad.dncjsxm85), either manually from the website, or using `download_data.py`) consists of various datasets for recreating figures and training/evaluating the brain-to-text model:

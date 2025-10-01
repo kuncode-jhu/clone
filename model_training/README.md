@@ -22,6 +22,18 @@ python train_model.py
 ```
 The model will train for 120,000 mini-batches (~3.5 hours on an RTX 4090) and should achieve an aggregate phoneme error rate of 10.1% on the validation partition. We note that the number of training batches and specific model hyperparameters may not be optimal here, and this baseline model is only meant to serve as an example. See [`rnn_args.yaml`](rnn_args.yaml) for a list of all hyperparameters.
 
+### DCoND-LIFT phoneme decoder
+To reproduce the diphone-based DCoND-LIFT model described in Li et al. (2024), we provide a dedicated trainer, configuration file, and utilities that augment the baseline RNN with diphone supervision and phoneme-aware marginalisation. The training loop jointly optimises a diphone CTC loss and a marginalised phoneme CTC loss using the scheduling strategy reported in the paper.
+
+Train the DCoND model with:
+```bash
+conda activate b2txt25
+python train_dcond.py
+```
+Hyperparameters (including the α schedule that balances diphone and phoneme losses, the diphone expansion strategy, and the silence token index) are documented in [`dcond_args.yaml`](dcond_args.yaml). Validation checkpoints automatically store marginalised phoneme logits so that downstream language-model rescoring and LIFT correction can be applied without any additional conversion steps. The diphone utilities are implemented in [`dcond_utils.py`](dcond_utils.py) and are used transparently by the trainer and dataset loader.
+
+After training, the validation metrics written to `trained_models/dcond_lift/checkpoint/val_metrics.pkl` contain both diphone and phoneme losses together with phoneme logits. These files can be fed into the existing `language_model` pipeline to generate N-best candidate transcripts. The helper functions in `dcond_utils.py` expose reusable primitives for marginalising diphone predictions if you need to process checkpoints manually.
+
 ## Evaluation
 ### Start redis server
 To evaluate the model, first start a redis server on `localhost` in terminal with:
