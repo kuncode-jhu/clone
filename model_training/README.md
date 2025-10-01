@@ -22,6 +22,14 @@ python train_model.py
 ```
 The model will train for 120,000 mini-batches (~3.5 hours on an RTX 4090) and should achieve an aggregate phoneme error rate of 10.1% on the validation partition. We note that the number of training batches and specific model hyperparameters may not be optimal here, and this baseline model is only meant to serve as an example. See [`rnn_args.yaml`](rnn_args.yaml) for a list of all hyperparameters.
 
+### DCoND diphone-aware decoder
+This repository also includes the diphone-based DCoND decoder described in Li et al. (2024). The architecture reuses the baseline GRU backbone but trains it to predict diphone transitions while marginalising them back into phoneme probabilities. To train this model, run the dedicated helper script:
+```bash
+conda activate b2txt25
+python train_dcond.py
+```
+By default the script reuses the hyperparameters from [`rnn_args.yaml`](rnn_args.yaml) and enables diphone supervision with the loss schedule proposed in the paper. Command-line flags allow overriding the configuration or output directories if desired. Checkpoints and logs are written to `trained_models/dcond_rnn/` by default.
+
 ## Evaluation
 ### Start redis server
 To evaluate the model, first start a redis server on `localhost` in terminal with:

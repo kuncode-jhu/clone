@@ -11,6 +11,7 @@ import argparse
 
 from rnn_model import GRUDecoder
 from evaluate_model_helpers import *
+from diphone_utils import DiphoneCodec, DiphoneConfig
 
 # argument parser for command line arguments
 parser = argparse.ArgumentParser(description='Evaluate a pretrained RNN model on the copy task dataset.')
@@ -56,11 +57,31 @@ else:
     device = torch.device('cpu')
 
 # define model
+use_diphone = False
+diphone_codec = None
+dcond_args = model_args.get('dcond', {})
+if isinstance(dcond_args, OmegaConf):
+    dcond_args = OmegaConf.to_container(dcond_args, resolve=True)
+if isinstance(dcond_args, dict):
+    use_diphone = bool(dcond_args.get('use_diphone', False))
+
+if use_diphone:
+    blank_id = int(dcond_args.get('blank_id', 0))
+    sil_id = int(dcond_args.get('sil_id', 1))
+    include_terminal = bool(dcond_args.get('include_terminal_sil', True))
+    diphone_codec = DiphoneCodec(
+        n_phoneme_classes = model_args['dataset']['n_classes'],
+        config = DiphoneConfig(blank_id=blank_id, sil_id=sil_id, include_terminal_sil=include_terminal),
+    )
+    n_output_classes = diphone_codec.num_output_classes
+else:
+    n_output_classes = model_args['dataset']['n_classes']
+
 model = GRUDecoder(
     neural_dim = model_args['model']['n_input_features'],
-    n_units = model_args['model']['n_units'], 
+    n_units = model_args['model']['n_units'],
     n_days = len(model_args['dataset']['sessions']),
-    n_classes = model_args['dataset']['n_classes'],
+    n_classes = n_output_classes,
     rnn_dropout = model_args['model']['rnn_dropout'],
     input_dropout = model_args['model']['input_network']['input_layer_dropout'],
     n_layers = model_args['model']['n_layers'],
@@ -118,7 +139,7 @@ with tqdm(total=total_test_trials, desc='Predicting phoneme sequences', unit='tr
             neural_input = torch.tensor(neural_input, device=device, dtype=torch.bfloat16)
 
             # run decoding step
-            logits = runSingleDecodingStep(neural_input, input_layer, model, model_args, device)
+            logits = runSingleDecodingStep(neural_input, input_layer, model, model_args, device, diphone_codec)
             data['logits'].append(logits)
 
             pbar.update(1)

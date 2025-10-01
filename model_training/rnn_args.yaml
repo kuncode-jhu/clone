@@ -141,9 +141,19 @@ dataset:
   - 1
   - 1
   - 1
+dcond:
+  use_diphone: false
+  alpha_initial: 0.2
+  alpha_final: 0.6
+  alpha_warmup_steps: 0
+  alpha_ramp_steps: 40000
+  blank_id: 0
+  sil_id: 1
+  include_terminal_sil: true
   - 1
   - 1
   - 1
+
   - 1
   - 1
   - 1
@@ -175,3 +185,12 @@ dataset:
   - 1
   - 1
   - 1
+dcond:
+  use_diphone: false
+  alpha_initial: 0.2
+  alpha_final: 0.6
+  alpha_warmup_steps: 0
+  alpha_ramp_steps: 40000
+  blank_id: 0
+  sil_id: 1
+  include_terminal_sil: true

@@ -3,8 +3,10 @@ import numpy as np
 import h5py
 import time
 import re
+from typing import Optional
 
 from data_augmentations import gauss_smooth
+from diphone_utils import DiphoneCodec
 
 LOGIT_TO_PHONEME = [
     'BLANK',
@@ -84,7 +86,7 @@ def rearrange_speech_logits_pt(logits):
 
 # single decoding step function.
 # smooths data and puts it through the model.
-def runSingleDecodingStep(x, input_layer, model, model_args, device):
+def runSingleDecodingStep(x, input_layer, model, model_args, device, diphone_codec: Optional[DiphoneCodec] = None):
 
     # Use autocast for efficiency
     with torch.autocast(device_type = "cuda", enabled = model_args['use_amp'], dtype = torch.bfloat16):
@@ -105,8 +107,12 @@ def runSingleDecodingStep(x, input_layer, model, model_args, device):
                 return_state = True,
             )
 
-    # convert logits from bfloat16 to float32
-    logits = logits.float().cpu().numpy()
+    logits = logits.float()
+    log_probs = torch.log_softmax(logits, dim=-1)
+    if diphone_codec is not None:
+        log_probs = diphone_codec.marginalise_log_probs(log_probs)
+
+    logits = log_probs.cpu().numpy()
 
     # # original order is [BLANK, phonemes..., SIL]
     # # rearrange so the order is [BLANK, SIL, phonemes...]
