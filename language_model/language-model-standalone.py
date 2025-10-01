@@ -1,18 +1,49 @@
-import redis
 import argparse
-import numpy as np
-from datetime import datetime
-import time
+import logging
 import os
 import re
-import logging
+import time
+from datetime import datetime
+from functools import lru_cache
+from typing import Optional
+
+import numpy as np
+import redis
 import torch
 import lm_decoder
-from functools import lru_cache
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+try:
+    from transformers import BitsAndBytesConfig
+except ImportError:  # pragma: no cover - optional dependency for quantisation
+    BitsAndBytesConfig = None  # type: ignore[assignment]
 
 # set up logging
 logging.basicConfig(format='%(asctime)s %(levelname)s: %(message)s',level=logging.INFO)
+
+
+def _resolve_torch_dtype(name: Optional[str]) -> torch.dtype:
+    """Map a string descriptor to a torch dtype."""
+
+    if name is None:
+        return torch.float16 if torch.cuda.is_available() else torch.float32
+
+    normalised = name.lower()
+    mapping = {
+        'float16': torch.float16,
+        'fp16': torch.float16,
+        'half': torch.float16,
+        'bfloat16': torch.bfloat16,
+        'bf16': torch.bfloat16,
+        'float32': torch.float32,
+        'fp32': torch.float32,
+        'f32': torch.float32,
+    }
+    if normalised not in mapping:
+        raise ValueError(
+            f"Unsupported torch dtype '{name}'. Supported values: {sorted(mapping.keys())}."
+        )
+    return mapping[normalised]
 
 # function for initializing the ngram decoder
 def build_lm_decoder(
@@ -123,9 +154,62 @@ def build_opt(
     return model, tokenizer
 
 
-# function for rescoring hypotheses with the GPT-2 model
+def build_llama(
+        model_name='meta-llama/Llama-3.1-8B-Instruct',
+        cache_dir=None,
+        device: Optional[torch.device] = None,
+        torch_dtype: Optional[str] = None,
+        device_map: Optional[str] = 'auto',
+        load_in_4bit: bool = False,
+        load_in_8bit: bool = False,
+    ):
+
+    """Load a LLaMA-family causal language model for rescoring."""
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=cache_dir)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "right"
+
+    model_kwargs = {
+        'cache_dir': cache_dir,
+    }
+
+    if load_in_4bit or load_in_8bit:
+        if BitsAndBytesConfig is None:
+            raise ImportError(
+                'bitsandbytes is required for 4-bit/8-bit loading but is not installed.'
+            )
+        quant_config = BitsAndBytesConfig(
+            load_in_4bit=load_in_4bit,
+            load_in_8bit=load_in_8bit,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type='nf4',
+            bnb_4bit_compute_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+        )
+        model_kwargs['quantization_config'] = quant_config
+        model_kwargs['device_map'] = device_map or 'auto'
+    else:
+        dtype = _resolve_torch_dtype(torch_dtype)
+        model_kwargs['torch_dtype'] = dtype
+        if device_map and device_map.lower() != 'none':
+            model_kwargs['device_map'] = device_map
+
+    model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
+
+    if not (load_in_4bit or load_in_8bit):
+        if device_map is None or (isinstance(device_map, str) and device_map.lower() == 'none'):
+            if device is None:
+                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            model = model.to(device)
+
+    model.eval()
+    return model, tokenizer
+
+
+# function for rescoring hypotheses with a causal language model
 @torch.inference_mode()
-def rescore_with_gpt2(
+def rescore_with_causal_lm(
         model,
         tokenizer,
         device,
@@ -137,7 +221,8 @@ def rescore_with_gpt2(
     model.eval()
 
     inputs = tokenizer(hypotheses, return_tensors='pt', padding=True)
-    inputs = {k: v.to(device) for k, v in inputs.items()}
+    if device is not None:
+        inputs = {k: v.to(device) for k, v in inputs.items()}
 
     outputs = model(**inputs)
     # compute log-probabilities
@@ -161,7 +246,7 @@ def rescore_with_gpt2(
     return scores
 
 
-# function for decoding with the GPT-2 model
+# function for decoding with a causal language model
 def gpt2_lm_decode(
         model,
         tokenizer,
@@ -172,6 +257,7 @@ def gpt2_lm_decode(
         alpha,
         returnConfidence=False,
         current_context_str=None,
+        backend='opt',
     ):
 
     hypotheses = []
@@ -209,7 +295,7 @@ def gpt2_lm_decode(
     # get new LM scores from LLM
     try:
         # first, try to rescore all at once
-        newLMScores = np.array(rescore_with_gpt2(model, tokenizer, device, hypotheses, length_penalty))
+        newLMScores = np.array(rescore_with_causal_lm(model, tokenizer, device, hypotheses, length_penalty))
 
     except Exception as e:
         logging.error(f'Error during OPT rescore: {e}')
@@ -218,7 +304,7 @@ def gpt2_lm_decode(
             # if that fails, try to rescore in batches (to avoid VRAM issues)
             newLMScores = []
             for i in range(0, len(hypotheses), int(np.ceil(len(hypotheses)/5))):
-                newLMScores.extend(rescore_with_gpt2(model, tokenizer, device, hypotheses[i:i+int(np.ceil(len(hypotheses)/5))], length_penalty))
+                newLMScores.extend(rescore_with_causal_lm(model, tokenizer, device, hypotheses[i:i+int(np.ceil(len(hypotheses)/5))], length_penalty))
             newLMScores = np.array(newLMScores)
 
         except Exception as e:
@@ -429,11 +515,25 @@ def main(args):
     score_penalty_percent = args.score_penalty_percent
     blank_penalty = args.blank_penalty
 
-    do_opt = args.do_opt          # acoustic scale = 0.8, blank penalty = 7, alpha = 0.5
-    opt_cache_dir = args.opt_cache_dir
+    llm_backend = args.llm_backend.lower()
+    if args.do_opt:
+        llm_backend = 'opt'
+    llm_cache_dir = args.llm_cache_dir or args.opt_cache_dir
     alpha = args.alpha
     rescore = args.rescore
-    
+
+    llama_model_name = args.llama_model_name
+    llm_dtype = args.llm_dtype
+    llm_device_map = args.llm_device_map
+    llm_load_in_4bit = args.llm_load_in_4bit
+    llm_load_in_8bit = args.llm_load_in_8bit
+
+    if llm_load_in_4bit and llm_load_in_8bit:
+        raise ValueError('Cannot enable both 4-bit and 8-bit quantization simultaneously.')
+
+    use_llm = llm_backend != 'none'
+    backend_display = llm_backend.upper() if use_llm else 'NONE'
+
     redis_ip = args.redis_ip
     redis_port = args.redis_port
     input_stream = args.input_stream
@@ -444,8 +544,8 @@ def main(args):
     lm_path = os.path.expanduser(lm_path)
     if not os.path.exists(lm_path):
         raise ValueError(f'Language model path does not exist: {lm_path}')
-    if opt_cache_dir is not None:
-        opt_cache_dir = os.path.expanduser(opt_cache_dir)
+    if llm_cache_dir is not None:
+        llm_cache_dir = os.path.expanduser(llm_cache_dir)
 
     # create a nice dict of params to put into redis
     lm_args = {
@@ -460,25 +560,53 @@ def main(args):
         'nbest': int(nbest),
         'blank_penalty': float(blank_penalty),
         'alpha': float(alpha),
-        'do_opt': int(do_opt),
+        'do_opt': int(use_llm),
         'rescore': int(rescore),
         'top_candidates_to_augment': int(top_candidates_to_augment),
         'score_penalty_percent': float(score_penalty_percent),
+        'llm_backend': llm_backend,
     }
 
     # pick GPU
     device = torch.device(f"cuda:{gpu_number}" if torch.cuda.is_available() else "cpu")
     logging.info(f'Using device: {device}')
 
-    # initialize opt model
-    if do_opt:
-        logging.info(f"Building opt model from {opt_cache_dir}...")
-        start_time = time.time()
-        lm, lm_tokenizer = build_opt(
-            cache_dir=opt_cache_dir,
-            device=device,
-        )
-        logging.info(f'OPT model successfully built in {(time.time()-start_time):0.4f} seconds.')
+    llm_model = None
+    llm_tokenizer = None
+    llm_inference_device: Optional[torch.device] = device
+
+    if use_llm:
+        if llm_backend == 'opt':
+            logging.info(f"Building {backend_display} model from {llm_cache_dir}...")
+            start_time = time.time()
+            llm_model, llm_tokenizer = build_opt(
+                cache_dir=llm_cache_dir,
+                device=device,
+            )
+            logging.info(f'{backend_display} model successfully built in {(time.time()-start_time):0.4f} seconds.')
+            llm_inference_device = device
+        elif llm_backend == 'llama':
+            logging.info(f"Building {backend_display} model {llama_model_name}...")
+            start_time = time.time()
+            device_map_value = llm_device_map.lower() if llm_device_map is not None else None
+            llama_device = device
+            if device_map_value is not None and device_map_value.lower() != 'none':
+                llama_device = None
+            llm_model, llm_tokenizer = build_llama(
+                model_name=llama_model_name,
+                cache_dir=llm_cache_dir,
+                device=llama_device,
+                torch_dtype=llm_dtype,
+                device_map=device_map_value,
+                load_in_4bit=llm_load_in_4bit,
+                load_in_8bit=llm_load_in_8bit,
+            )
+            logging.info(f'{backend_display} model successfully built in {(time.time()-start_time):0.4f} seconds.')
+            llm_inference_device = llama_device
+        else:
+            raise ValueError(f"Unsupported llm_backend '{llm_backend}'.")
+    else:
+        llm_inference_device = None
 
     # initialize ngram decoder
     logging.info(f'Initializing language model decoder from {lm_path}...')
@@ -594,46 +722,43 @@ def main(args):
                     logging.info('Rescore time: %.3f' % (time.time() - startT))
 
 
-                # if nbest > 1, augment those sentences and bias them toward certain words
-                if nbest > 1:
+                # Collect candidate sentences and optionally augment them.
+                nbest_out = []
+                for d in ngramDecoder.result():
+                    nbest_out.append([d.sentence, d.ac_score, d.lm_score])
 
-                    # append the sentence, acoustic score, and lm score to a list
-                    nbest_out = []
-                    for d in ngramDecoder.result():
-                        nbest_out.append([d.sentence, d.ac_score, d.lm_score])
-
-                    # generate some more candidate sentences by swapping words around
+                if nbest > 1 and nbest_out:
                     nbest_out_len = len(nbest_out)
                     nbest_out = augment_nbest(
                         nbest = nbest_out,
                         top_candidates_to_augment = top_candidates_to_augment,
                         acoustic_scale = acoustic_scale,
                         score_penalty_percent = score_penalty_percent,
-                        )
+                    )
                     logging.info(f'Augmented nbest from {nbest_out_len} to {len(nbest_out)} candidates.')
 
-
                 # Optionally rescore with a LLM
-                if do_opt:
+                if use_llm and llm_model is not None and llm_tokenizer is not None and nbest_out:
                     startT = time.time()
 
                     decoded_final, nbest_redis, confidences = gpt2_lm_decode(
-                        lm,
-                        lm_tokenizer,
-                        device,
+                        llm_model,
+                        llm_tokenizer,
+                        llm_inference_device,
                         nbest_out,
                         acoustic_scale,
                         alpha = alpha,
                         length_penalty = length_penalty,
                         current_context_str = current_context_str,
                         returnConfidence = True,
+                        backend=llm_backend,
                     )
-                    logging.info('OPT time: %.3f' % (time.time() - startT))
-                        
+                    logging.info(f'{backend_display} time: {(time.time() - startT):.3f}')
+
                 elif len(ngramDecoder.result()) > 0:
                     # Otherwise just output the best sentence
                     decoded_final = ngramDecoder.result()[0].sentence
-                    
+
                     # create nbest_redis with 0 values for LLM score
                     nbest_redis = []
                     for i in range(len(nbest_out)):
@@ -679,7 +804,14 @@ def main(args):
                     nbest = int(entry_data.get(b'nbest', nbest))
                     blank_penalty = float(entry_data.get(b'blank_penalty', blank_penalty))
                     alpha = float(entry_data.get(b'alpha', alpha))
-                    do_opt = int(entry_data.get(b'do_opt', do_opt))
+                    incoming_do_opt = entry_data.get(b'do_opt', None)
+                    if incoming_do_opt is not None:
+                        use_llm = bool(int(incoming_do_opt))
+                    incoming_backend = entry_data.get(b'llm_backend', None)
+                    if incoming_backend is not None:
+                        llm_backend = (incoming_backend.decode() if isinstance(incoming_backend, bytes) else str(incoming_backend)).lower()
+                        backend_display = llm_backend.upper() if llm_backend != 'none' else 'NONE'
+                        use_llm = llm_backend != 'none'
                     rescore = int(entry_data.get(b'rescore', rescore))
                     top_candidates_to_augment = int(entry_data.get(b'top_candidates_to_augment', top_candidates_to_augment))
                     score_penalty_percent = float(entry_data.get(b'score_penalty_percent', score_penalty_percent))
@@ -697,13 +829,14 @@ def main(args):
                         'nbest': int(nbest),
                         'blank_penalty': float(blank_penalty),
                         'alpha': float(alpha),
-                        'do_opt': int(do_opt),
+                        'do_opt': int(use_llm),
                         'rescore': int(rescore),
                         'top_candidates_to_augment': int(top_candidates_to_augment),
                         'score_penalty_percent': float(score_penalty_percent),
+                        'llm_backend': llm_backend,
                     }
                     r.xadd('remote_lm_args', lm_args)
-                    
+
                     # update ngram parameters
                     update_ngram_params(
                         ngramDecoder,
@@ -728,7 +861,8 @@ def main(args):
                         f'\n\tnbest = {nbest}' +
                         f'\n\tblank_penalty = {blank_penalty}' +
                         f'\n\talpha = {alpha}' +
-                        f'\n\tdo_opt = {do_opt}' +
+                        f'\n\tllm_backend = {llm_backend}' +
+                        f'\n\tuse_llm = {use_llm}' +
                         f'\n\trescore = {rescore}' +
                         f'\n\ttop_candidates_to_augment = {top_candidates_to_augment}' +
                         f'\n\tscore_penalty_percent = {score_penalty_percent}'
@@ -809,8 +943,15 @@ if __name__ == "__main__":
     parser.add_argument('--blank_penalty', type=float, default=9.0, help='Blank penalty for LM')
 
     parser.add_argument('--rescore', action='store_true', help='Use an unpruned ngram model for rescoring?')
-    parser.add_argument('--do_opt', action='store_true', help='Use the opt model for rescoring?')
-    parser.add_argument('--opt_cache_dir', type=str, default=None, help='path to opt cache')
+    parser.add_argument('--do_opt', action='store_true', help='Shortcut for --llm_backend=opt')
+    parser.add_argument('--opt_cache_dir', type=str, default=None, help='Path to OPT cache (deprecated; use --llm_cache_dir)')
+    parser.add_argument('--llm_backend', type=str, default='none', choices=['none', 'opt', 'llama'], help='Causal LLM backend used for rescoring')
+    parser.add_argument('--llm_cache_dir', type=str, default=None, help='Cache directory for LLM weights (defaults to --opt_cache_dir if unset)')
+    parser.add_argument('--llama_model_name', type=str, default='meta-llama/Llama-3.1-8B-Instruct', help='Hugging Face model id to load when --llm_backend=llama')
+    parser.add_argument('--llm_dtype', type=str, default='bfloat16', help='Torch dtype for full-precision LLaMA loading (e.g., float16, bfloat16)')
+    parser.add_argument('--llm_device_map', type=str, default='auto', help='Device map used when loading LLaMA. Set to "none" to keep the model on the selected GPU')
+    parser.add_argument('--llm_load_in_4bit', action='store_true', help='Load the LLaMA backend using 4-bit quantization (requires bitsandbytes)')
+    parser.add_argument('--llm_load_in_8bit', action='store_true', help='Load the LLaMA backend using 8-bit quantization (requires bitsandbytes)')
     parser.add_argument('--alpha', type=float, default=0.5, help='alpha value [0-1]: Higher = more weight on OPT rescore. Lower = more weight on ngram rescore')
 
     parser.add_argument('--redis_ip', type=str, default='192.168.150.2', help='IP of the redis stream (string)')
