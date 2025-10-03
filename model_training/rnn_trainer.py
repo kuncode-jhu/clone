@@ -55,6 +55,14 @@ class BrainToTextDecoder_Trainer:
 
         self.transform_args = self.args['dataset']['data_transforms']
 
+        self.dcond_args = self.args.get('dcond', {})
+        self.dcond_enabled = self.dcond_args.get('enabled', False)
+        self.n_phonemes = self.args['dataset']['n_classes'] - 1
+        self.sil_index = self.dcond_args.get('sil_index', self.args['dataset']['n_classes'] - 1)
+
+        if self.dcond_enabled and self.sil_index == 0:
+            raise ValueError('sil_index must correspond to a non-blank phoneme when using DCoND.')
+
         # Create output directory
         if args['mode'] == 'train':
             os.makedirs(self.args['output_dir'], exist_ok=False)
@@ -116,18 +124,32 @@ class BrainToTextDecoder_Trainer:
             random.seed(self.args['seed'])
             torch.manual_seed(self.args['seed'])
 
-        # Initialize the model 
-        self.model = GRUDecoder(
-            neural_dim = self.args['model']['n_input_features'],
-            n_units = self.args['model']['n_units'],
-            n_days = len(self.args['dataset']['sessions']),
-            n_classes  = self.args['dataset']['n_classes'],
-            rnn_dropout = self.args['model']['rnn_dropout'], 
-            input_dropout = self.args['model']['input_network']['input_layer_dropout'], 
-            n_layers = self.args['model']['n_layers'],
-            patch_size = self.args['model']['patch_size'],
-            patch_stride = self.args['model']['patch_stride'],
-        )
+        # Initialize the model
+        if self.dcond_enabled:
+            self.model = DCoNDDecoder(
+                neural_dim = self.args['model']['n_input_features'],
+                n_units = self.args['model']['n_units'],
+                n_days = len(self.args['dataset']['sessions']),
+                n_classes  = self.args['dataset']['n_classes'],
+                rnn_dropout = self.args['model']['rnn_dropout'],
+                input_dropout = self.args['model']['input_network']['input_layer_dropout'],
+                n_layers = self.args['model']['n_layers'],
+                patch_size = self.args['model']['patch_size'],
+                patch_stride = self.args['model']['patch_stride'],
+                sil_phoneme_id = self.sil_index,
+            )
+        else:
+            self.model = GRUDecoder(
+                neural_dim = self.args['model']['n_input_features'],
+                n_units = self.args['model']['n_units'],
+                n_days = len(self.args['dataset']['sessions']),
+                n_classes  = self.args['dataset']['n_classes'],
+                rnn_dropout = self.args['model']['rnn_dropout'],
+                input_dropout = self.args['model']['input_network']['input_layer_dropout'],
+                n_layers = self.args['model']['n_layers'],
+                patch_size = self.args['model']['patch_size'],
+                patch_stride = self.args['model']['patch_stride'],
+            )
 
         # Call torch.compile to speed up training
         self.logger.info("Using torch.compile")
@@ -192,7 +214,10 @@ class BrainToTextDecoder_Trainer:
             batch_size = self.args['dataset']['batch_size'],
             must_include_days = None,
             random_seed = self.args['dataset']['seed'],
-            feature_subset = feature_subset
+            feature_subset = feature_subset,
+            use_diphone_targets = self.dcond_enabled,
+            sil_phoneme_id = self.sil_index,
+            n_phonemes = self.n_phonemes,
             )
         self.train_loader = DataLoader(
             self.train_dataset,
@@ -204,14 +229,17 @@ class BrainToTextDecoder_Trainer:
 
         # val dataset and dataloader
         self.val_dataset = BrainToTextDataset(
-            trial_indicies = val_trials, 
+            trial_indicies = val_trials,
             split = 'test',
             days_per_batch = None,
             n_batches = None,
             batch_size = self.args['dataset']['batch_size'],
             must_include_days = None,
             random_seed = self.args['dataset']['seed'],
-            feature_subset = feature_subset   
+            feature_subset = feature_subset,
+            use_diphone_targets = self.dcond_enabled,
+            sil_phoneme_id = self.sil_index,
+            n_phonemes = self.n_phonemes,
             )
         self.val_loader = DataLoader(
             self.val_dataset,
@@ -240,6 +268,17 @@ class BrainToTextDecoder_Trainer:
             raise ValueError(f"Invalid learning rate scheduler type: {self.args['lr_scheduler_type']}")
         
         self.ctc_loss = torch.nn.CTCLoss(blank = 0, reduction = 'none', zero_infinity = False)
+
+        if self.dcond_enabled:
+            self.alpha_start = self.dcond_args.get('alpha_start', 0.1)
+            self.alpha_end = self.dcond_args.get('alpha_end', 0.6)
+            self.alpha_warmup_steps = self.dcond_args.get('alpha_warmup_steps', 20000)
+        else:
+            self.alpha_start = 1.0
+            self.alpha_end = 1.0
+            self.alpha_warmup_steps = 1
+
+        self.global_step = 0
 
         # If a checkpoint is provided, then load from checkpoint
         if self.args['init_from_checkpoint']:
@@ -359,8 +398,15 @@ class BrainToTextDecoder_Trainer:
             ]
         else:
             raise ValueError(f"Invalid number of param groups in optimizer: {len(optim.param_groups)}")
-        
+
         return LambdaLR(optim, lr_lambdas, -1)
+
+    def get_alpha(self):
+        if not self.dcond_enabled:
+            return 1.0
+
+        progress = min(1.0, self.global_step / max(1, self.alpha_warmup_steps))
+        return self.alpha_start + (self.alpha_end - self.alpha_start) * progress
         
     def load_model_checkpoint(self, load_path):
         ''' 
@@ -522,6 +568,9 @@ class BrainToTextDecoder_Trainer:
             n_time_steps = batch['n_time_steps'].to(self.device)
             phone_seq_lens = batch['phone_seq_lens'].to(self.device)
             day_indicies = batch['day_indicies'].to(self.device)
+            if self.dcond_enabled:
+                diphone_labels = batch['diphone_seq_class_ids'].to(self.device)
+                diphone_seq_lens = batch['diphone_seq_lens'].to(self.device)
 
             # Use autocast for efficiency
             with torch.autocast(device_type = "cuda", enabled = self.args['use_amp'], dtype = torch.bfloat16):
@@ -531,23 +580,48 @@ class BrainToTextDecoder_Trainer:
 
                 adjusted_lens = ((n_time_steps - self.args['model']['patch_size']) / self.args['model']['patch_stride'] + 1).to(torch.int32)
 
-                # Get phoneme predictions 
-                logits = self.model(features, day_indicies)
+                if self.dcond_enabled:
+                    outputs = self.model(features, day_indicies)
+                    phoneme_log_probs = outputs['phoneme_log_probs']
+                    diphone_log_probs = outputs['diphone_log_probs']
 
-                # Calculate CTC Loss
-                loss = self.ctc_loss(
-                    log_probs = torch.permute(logits.log_softmax(2), [1, 0, 2]),
-                    targets = labels,
-                    input_lengths = adjusted_lens,
-                    target_lengths = phone_seq_lens
+                    phoneme_loss = self.ctc_loss(
+                        log_probs = torch.permute(phoneme_log_probs, [1, 0, 2]),
+                        targets = labels,
+                        input_lengths = adjusted_lens,
+                        target_lengths = phone_seq_lens,
                     )
-                    
-                loss = torch.mean(loss) # take mean loss over batches
-            
+
+                    diphone_loss = self.ctc_loss(
+                        log_probs = torch.permute(diphone_log_probs, [1, 0, 2]),
+                        targets = diphone_labels,
+                        input_lengths = adjusted_lens,
+                        target_lengths = diphone_seq_lens,
+                    )
+
+                    phoneme_loss = torch.mean(phoneme_loss)
+                    diphone_loss = torch.mean(diphone_loss)
+                    current_alpha = self.get_alpha()
+                    loss = current_alpha * phoneme_loss + (1 - current_alpha) * diphone_loss
+                else:
+                    logits = self.model(features, day_indicies)
+
+                    loss = self.ctc_loss(
+                        log_probs = torch.permute(logits.log_softmax(2), [1, 0, 2]),
+                        targets = labels,
+                        input_lengths = adjusted_lens,
+                        target_lengths = phone_seq_lens
+                        )
+
+                    loss = torch.mean(loss) # take mean loss over batches
+                    phoneme_loss = loss
+                    diphone_loss = torch.tensor(0.0, device=loss.device)
+                    current_alpha = 1.0
+
             loss.backward()
 
             # Clip gradient
-            if self.args['grad_norm_clip_value'] > 0: 
+            if self.args['grad_norm_clip_value'] > 0:
                 grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), 
                                                max_norm = self.args['grad_norm_clip_value'],
                                                error_if_nonfinite = True,
@@ -563,10 +637,23 @@ class BrainToTextDecoder_Trainer:
 
             # Incrementally log training progress
             if i % self.args['batches_per_train_log'] == 0:
-                self.logger.info(f'Train batch {i}: ' +
-                        f'loss: {(loss.detach().item()):.2f} ' +
+                if self.dcond_enabled:
+                    self.logger.info(
+                        f'Train batch {i}: '
+                        f'loss: {(loss.detach().item()):.2f} '
+                        f'phoneme_loss: {phoneme_loss.detach().item():.2f} '
+                        f'diphone_loss: {diphone_loss.detach().item():.2f} '
+                        f'alpha: {current_alpha:.3f} '
                         f'grad norm: {grad_norm:.2f} '
-                        f'time: {train_step_duration:.3f}')
+                        f'time: {train_step_duration:.3f}'
+                    )
+                else:
+                    self.logger.info(f'Train batch {i}: '
+                            f'loss: {(loss.detach().item()):.2f} '
+                            f'grad norm: {grad_norm:.2f} '
+                            f'time: {train_step_duration:.3f}')
+
+            self.global_step += 1
 
             # Incrementally run a test step
             if i % self.args['batches_per_val_step'] == 0 or i == ((self.args['num_training_batches'] - 1)):
@@ -691,10 +778,13 @@ class BrainToTextDecoder_Trainer:
             n_time_steps = batch['n_time_steps'].to(self.device)
             phone_seq_lens = batch['phone_seq_lens'].to(self.device)
             day_indicies = batch['day_indicies'].to(self.device)
+            if self.dcond_enabled:
+                diphone_labels = batch['diphone_seq_class_ids'].to(self.device)
+                diphone_seq_lens = batch['diphone_seq_lens'].to(self.device)
 
             # Determine if we should perform validation on this batch
             day = day_indicies[0].item()
-            if self.args['dataset']['dataset_probability_val'][day] == 0: 
+            if self.args['dataset']['dataset_probability_val'][day] == 0:
                 if self.args['log_val_skip_logs']:
                     self.logger.info(f"Skipping validation on day {day}")
                 continue
@@ -706,20 +796,43 @@ class BrainToTextDecoder_Trainer:
 
                     adjusted_lens = ((n_time_steps - self.args['model']['patch_size']) / self.args['model']['patch_stride'] + 1).to(torch.int32)
 
-                    logits = self.model(features, day_indicies)
-    
-                    loss = self.ctc_loss(
-                        torch.permute(logits.log_softmax(2), [1, 0, 2]),
-                        labels,
-                        adjusted_lens,
-                        phone_seq_lens,
-                    )
-                    loss = torch.mean(loss)
+                    if self.dcond_enabled:
+                        outputs = self.model(features, day_indicies)
+                        phoneme_log_probs = outputs['phoneme_log_probs']
+                        diphone_log_probs = outputs['diphone_log_probs']
+                        logits = outputs['phoneme_logits']
+
+                        phoneme_loss = self.ctc_loss(
+                            torch.permute(phoneme_log_probs, [1, 0, 2]),
+                            labels,
+                            adjusted_lens,
+                            phone_seq_lens,
+                        )
+                        diphone_loss = self.ctc_loss(
+                            torch.permute(diphone_log_probs, [1, 0, 2]),
+                            diphone_labels,
+                            adjusted_lens,
+                            diphone_seq_lens,
+                        )
+                        phoneme_loss = torch.mean(phoneme_loss)
+                        diphone_loss = torch.mean(diphone_loss)
+                        alpha = self.get_alpha()
+                        loss = alpha * phoneme_loss + (1 - alpha) * diphone_loss
+                    else:
+                        logits = self.model(features, day_indicies)
+                        loss = self.ctc_loss(
+                            torch.permute(logits.log_softmax(2), [1, 0, 2]),
+                            labels,
+                            adjusted_lens,
+                            phone_seq_lens,
+                        )
+                        loss = torch.mean(loss)
+                        phoneme_loss = loss
 
                 metrics['losses'].append(loss.cpu().detach().numpy())
 
                 # Calculate PER per day and also avg over entire validation set
-                batch_edit_distance = 0 
+                batch_edit_distance = 0
                 decoded_seqs = []
                 for iterIdx in range(logits.shape[0]):
                     decoded_seq = torch.argmax(logits[iterIdx, 0 : adjusted_lens[iterIdx], :].clone().detach(),dim=-1)
@@ -756,7 +869,6 @@ class BrainToTextDecoder_Trainer:
             metrics['true_seq'].append(batch['seq_class_ids'].cpu().numpy())
             metrics['phone_seq_lens'].append(batch['phone_seq_lens'].cpu().numpy())
             metrics['transcription'].append(batch['transcriptions'].cpu().numpy())
-            metrics['losses'].append(loss.detach().item())
             metrics['block_nums'].append(batch['block_nums'].numpy())
             metrics['trial_nums'].append(batch['trial_nums'].numpy())
             metrics['day_indicies'].append(batch['day_indicies'].cpu().numpy())

@@ -98,12 +98,17 @@ def runSingleDecodingStep(x, input_layer, model, model_args, device):
         )
 
         with torch.no_grad():
-            logits, _ = model(
+            outputs, _ = model(
                 x = x,
                 day_idx = torch.tensor([input_layer], device=device),
                 states = None, # no initial states
                 return_state = True,
             )
+
+    if isinstance(outputs, dict):
+        logits = outputs['phoneme_logits']
+    else:
+        logits = outputs
 
     # convert logits from bfloat16 to float32
     logits = logits.float().cpu().numpy()
