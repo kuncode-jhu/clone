@@ -18,6 +18,8 @@ from data_augmentations import gauss_smooth
 import torchaudio.functional as F # for edit distance
 from omegaconf import OmegaConf
 
+from trainer_path_utils import prepare_run_directory, is_subpath
+
 from dcond_utils import (
     DEFAULT_SILENCE_ID,
     diphone_vocab_size,
@@ -79,13 +81,30 @@ class DCoNDTrainer:
 
         self.transform_args = self.args['dataset']['data_transforms']
 
-        # Create output directory
-        if args['mode'] == 'train':
-            os.makedirs(self.args['output_dir'], exist_ok=False)
+        self._init_messages = []
 
-        # Create checkpoint directory
-        if args['save_best_checkpoint'] or args['save_all_val_steps'] or args['save_final_model']: 
-            os.makedirs(self.args['checkpoint_dir'], exist_ok=False)
+        if args['mode'] == 'train':
+            original_output_dir = pathlib.Path(self.args['output_dir'])
+            output_dir_path, info_msg = prepare_run_directory(original_output_dir)
+            self.args['output_dir'] = str(output_dir_path)
+            if info_msg:
+                self._init_messages.append(info_msg)
+
+            if args['save_best_checkpoint'] or args['save_all_val_steps'] or args['save_final_model']:
+                original_checkpoint_dir = pathlib.Path(self.args['checkpoint_dir'])
+
+                if is_subpath(original_checkpoint_dir, original_output_dir):
+                    relative_checkpoint = original_checkpoint_dir.relative_to(original_output_dir)
+                    checkpoint_target = output_dir_path / relative_checkpoint
+                else:
+                    checkpoint_target = original_checkpoint_dir
+
+                checkpoint_dir_path, checkpoint_msg = prepare_run_directory(checkpoint_target)
+                self.args['checkpoint_dir'] = str(checkpoint_dir_path)
+                if checkpoint_msg:
+                    self._init_messages.append(checkpoint_msg)
+        else:
+            self._init_messages = []
 
         # Set up logging
         self.logger = logging.getLogger(__name__)
@@ -104,6 +123,9 @@ class DCoNDTrainer:
         sh = logging.StreamHandler(sys.stdout)
         sh.setFormatter(formatter)
         self.logger.addHandler(sh)
+
+        for message in self._init_messages:
+            self.logger.info(message)
 
         # Configure device pytorch will use 
         if torch.cuda.is_available():
